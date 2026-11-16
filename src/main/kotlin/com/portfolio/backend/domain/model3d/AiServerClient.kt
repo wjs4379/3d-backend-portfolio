@@ -1,0 +1,83 @@
+package com.portfolio.backend.domain.model3d
+
+import org.springframework.beans.factory.annotation.Value
+import org.springframework.stereotype.Component
+import org.springframework.web.reactive.function.client.WebClient
+import reactor.core.publisher.Mono
+
+/** FastAPI AI 서버의 분석·보정·재구성 API를 호출합니다. */
+@Component
+class AiServerClient(
+    @param:Value("\${ai.server.base-url}")
+    private val aiServerBaseUrl: String,
+    @param:Value("\${app.ai.service-key:}") private val serviceKey: String = ""
+) {
+    private val webClient: WebClient by lazy {
+        WebClient.builder()
+            .baseUrl(aiServerBaseUrl)
+            .codecs { it.defaultCodecs().maxInMemorySize(AiPayloadLimits.MAX_RESULT_BYTES) }
+            .defaultHeader("X-AI-Service-Key", serviceKey)
+            .build()
+    }
+
+    /** 1차 이미지 분석을 요청합니다. */
+    fun analyze(request: AiAnalyzeRequestDto): Mono<Void> {
+        return analyze(request, null)
+    }
+
+    fun analyze(
+        request: AiAnalyzeRequestDto,
+        idempotencyKey: String?
+    ): Mono<Void> {
+        return webClient.post()
+            .uri(if (request.imagePaths.size == AiPayloadLimits.SOURCE_IMAGE_COUNT && request.imagePaths.distinct().size == AiPayloadLimits.SOURCE_IMAGE_COUNT)
+                "/api/v1/rooms/analyze" else "/api/v1/rooms/analyze/replay")
+            .headers { headers ->
+                idempotencyKey
+                    ?.takeIf(String::isNotBlank)
+                    ?.let { headers.set("Idempotency-Key", it) }
+            }
+            .bodyValue(request)
+            .retrieve()
+            .bodyToMono(Void::class.java)
+            .timeout(java.time.Duration.ofSeconds(15))
+    }
+
+    /** 사용자가 보정한 좌표를 AI 서버에 전달합니다. */
+    fun sendCorrection(
+        aiRoomId: String,
+        request: CorrectionRequestDto
+    ): Mono<Void> = sendCorrection(aiRoomId, request, null)
+
+    fun sendCorrection(aiRoomId: String, request: CorrectionRequestDto, idempotencyKey: String?): Mono<Void> {
+        return webClient.patch()
+            .uri("/api/v1/rooms/{aiRoomId}/correction", aiRoomId)
+            .headers { headers -> idempotencyKey?.let { headers.set("Idempotency-Key", it) } }
+            .bodyValue(request)
+            .retrieve()
+            .bodyToMono(Void::class.java)
+            .timeout(java.time.Duration.ofSeconds(15))
+    }
+
+    /** 보정 좌표를 기반으로 최종 재구성을 요청합니다. */
+    fun reconstruct(aiRoomId: String): Mono<Void> = reconstruct(aiRoomId, null)
+
+    fun reconstruct(aiRoomId: String, idempotencyKey: String?): Mono<Void> {
+        return webClient.post()
+            .uri("/api/v1/rooms/{aiRoomId}/reconstruct", aiRoomId)
+            .headers { headers -> idempotencyKey?.let { headers.set("Idempotency-Key", it) } }
+            .retrieve()
+            .bodyToMono(Void::class.java)
+            .timeout(java.time.Duration.ofSeconds(15))
+    }
+
+    /** Webhook 유실 시 AI 서버의 현재 상태와 결과를 다시 조회합니다. */
+    fun getRoom(aiRoomId: String): AiRoomResponseDto {
+        return webClient.get()
+            .uri("/api/v1/rooms/{aiRoomId}", aiRoomId)
+            .retrieve()
+            .bodyToMono(AiRoomResponseDto::class.java)
+            .block(java.time.Duration.ofSeconds(15))
+            ?: throw IllegalStateException("AI 서버 room 조회 응답이 비어 있습니다.")
+    }
+}

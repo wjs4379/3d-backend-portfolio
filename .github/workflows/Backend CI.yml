@@ -1,0 +1,86 @@
+name: Backend CI
+
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test and package estate app
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Grant execute permission for Gradle wrapper
+        run: chmod +x gradlew
+
+      - name: Require Docker for MySQL migration tests
+        run: docker info > /dev/null
+
+      - name: Verify AWS deployment safeguards without external resources
+        run: python3 -B -m unittest discover -s deploy/tests -p 'test_*.py' -v
+
+      - name: Verify local backup and process ownership safeguards
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py' -v
+
+      - name: Verify browser V2 integration contract
+        run: node --test integration/tests/*.test.mjs
+
+      - name: Run tests and build executable JAR
+        run: ./gradlew check bootJar --no-daemon --stacktrace
+
+      - name: Require executed MySQL migration tests
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          reports = list(Path("build/test-results/test").glob("TEST-*MySqlMigrationIntegrationTest.xml"))
+          if len(reports) != 1:
+              raise SystemExit("Missing MySQL migration test report")
+          suite = ET.parse(reports[0]).getroot()
+          if int(suite.get("tests", "0")) < 7 or any(int(suite.get(k, "0")) != 0 for k in ("skipped", "failures", "errors")):
+              raise SystemExit("MySQL migration tests must execute and pass without skips")
+          print("MySQL migration tests executed without skips")
+          PY
+
+      - name: Validate deployment configuration without loading secrets
+        run: |
+          docker compose --env-file .env.example -f compose.yaml -f compose.prod.yaml config --quiet
+          docker compose --env-file deploy/aws.env.example -f compose.aws.yaml config --quiet
+          docker compose --env-file deploy/aws-cloudfront.env.example -f compose.aws-cloudfront.yaml config --quiet
+          docker compose --env-file deploy/aws-cloudfront-local.env.example -f compose.aws-cloudfront-local.yaml config --quiet
+          docker compose --env-file deploy/aws-cloudfront-local.preview.env.example -f compose.aws-cloudfront-local.yaml config --quiet
+
+      - name: Build runtime container
+        run: docker build --tag gp-backend:ci .
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-test-reports-${{ github.run_id }}
+          path: build/reports/tests/
+          if-no-files-found: ignore
+          retention-days: 7

@@ -1,0 +1,19 @@
+### Current protected V2 example. Supply a real OAuth-issued token locally.
+@base = http://localhost:8080
+@accessToken = REPLACE_LOCALLY_DO_NOT_COMMIT
+
+### Production readiness; not an OAuth/AI E2E check.
+GET {{base}}/actuator/health/readiness
+
+### Current authenticated principal.
+GET {{base}}/api/auth/me
+Authorization: Bearer {{accessToken}}
+
+### User-owned units.
+GET {{base}}/api/v2/me/units
+Authorization: Bearer {{accessToken}}
+
+### Public listings.
+GET {{base}}/api/v2/listings?page=0&size=20
+
+### See docs/frontend-api-contract.md for upload-session and four-photo analysis.
